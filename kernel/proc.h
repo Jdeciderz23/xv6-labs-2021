@@ -101,6 +101,13 @@ struct proc {
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
+#ifdef LAB_TRAPS
+  int alarm_interval;          // timer ticks between alarm deliveries
+  int alarm_elapsed;           // ticks used since the last delivery
+  uint64 alarm_handler;        // user-space handler address
+  int alarming;                // handler is running; prevent re-entry
+  struct trapframe alarm_tf;   // interrupted user register state
+#endif
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory

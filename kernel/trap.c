@@ -76,6 +76,18 @@ usertrap(void)
   if(p->killed)
     exit(-1);
 
+#ifdef LAB_TRAPS
+  if(which_dev == 2 && p->alarm_interval > 0 && !p->alarming){
+    p->alarm_elapsed++;
+    if(p->alarm_elapsed == p->alarm_interval){
+      p->alarm_elapsed = 0;
+      p->alarming = 1;
+      p->alarm_tf = *(p->trapframe);
+      p->trapframe->epc = p->alarm_handler;
+    }
+  }
+#endif
+
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
     yield();
@@ -217,4 +229,3 @@ devintr()
     return 0;
   }
 }
-
