@@ -18,15 +18,20 @@ struct run {
   struct run *next;
 };
 
-struct {
+struct kmem_cpu {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+};
+
+// A separate free list for each CPU lets ordinary allocations and frees run
+// without contending on one global allocator lock.
+struct kmem_cpu kmem[NCPU];
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  for(int i = 0; i < NCPU; i++)
+    initlock(&kmem[i].lock, "kmem");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -47,6 +52,7 @@ void
 kfree(void *pa)
 {
   struct run *r;
+  int cpu;
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
@@ -56,10 +62,16 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  // cpuid() is valid only with interrupts disabled. The page can be returned
+  // to the list of whichever CPU is executing kfree().
+  push_off();
+  cpu = cpuid();
+  pop_off();
+
+  acquire(&kmem[cpu].lock);
+  r->next = kmem[cpu].freelist;
+  kmem[cpu].freelist = r;
+  release(&kmem[cpu].lock);
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -69,12 +81,34 @@ void *
 kalloc(void)
 {
   struct run *r;
+  int cpu;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
+  push_off();
+  cpu = cpuid();
+  pop_off();
+
+  acquire(&kmem[cpu].lock);
+  r = kmem[cpu].freelist;
   if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+    kmem[cpu].freelist = r->next;
+  release(&kmem[cpu].lock);
+
+  // A CPU with no local free pages borrows one from another list. Borrowing
+  // is rare after the initial redistribution, so it does not reintroduce the
+  // contention of a single global free list.
+  if(r == 0){
+    for(int i = 0; i < NCPU; i++){
+      if(i == cpu)
+        continue;
+      acquire(&kmem[i].lock);
+      r = kmem[i].freelist;
+      if(r)
+        kmem[i].freelist = r->next;
+      release(&kmem[i].lock);
+      if(r)
+        break;
+    }
+  }
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
