@@ -1,0 +1,9 @@
+With two threads, both can call put() for different keys in the same hash
+bucket at nearly the same time. Each thread reads the same current table[i]
+head, allocates a new entry whose next field points to that old head, and then
+stores its entry into table[i]. The later store overwrites the earlier store,
+so the earlier entry is no longer reachable and its key is reported missing.
+
+The implementation uses one mutex per hash bucket. Operations on the same
+bucket are serialized, preventing the lost-head update, while operations on
+different buckets can still proceed in parallel.
