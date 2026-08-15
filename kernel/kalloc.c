@@ -21,7 +21,17 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  // Physical pages returned by kinit() are all in [KERNBASE, PHYSTOP).
+  // The count records the number of user page-table mappings that share a
+  // page, plus the single ownership held by a freshly allocated page.
+  int refcnt[(PHYSTOP - KERNBASE) / PGSIZE];
 } kmem;
+
+static int
+paindex(void *pa)
+{
+  return ((uint64)pa - KERNBASE) / PGSIZE;
+}
 
 void
 kinit()
@@ -35,8 +45,14 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+    // kfree() drops a reference, so seed every page with one reference
+    // while constructing the initial free list.
+    acquire(&kmem.lock);
+    kmem.refcnt[paindex(p)] = 1;
+    release(&kmem.lock);
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by v,
@@ -51,12 +67,19 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  acquire(&kmem.lock);
+  if(kmem.refcnt[paindex(pa)] < 1)
+    panic("kfree ref");
+  kmem.refcnt[paindex(pa)]--;
+  if(kmem.refcnt[paindex(pa)] > 0){
+    release(&kmem.lock);
+    return;
+  }
+
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
-
-  acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
   release(&kmem.lock);
@@ -72,11 +95,35 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
+    kmem.refcnt[paindex(r)] = 1;
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+// Add one mapping reference to a physical page shared by COW fork.
+void
+krefinc(void *pa)
+{
+  acquire(&kmem.lock);
+  if(kmem.refcnt[paindex(pa)] < 1)
+    panic("krefinc");
+  kmem.refcnt[paindex(pa)]++;
+  release(&kmem.lock);
+}
+
+int
+krefcount(void *pa)
+{
+  int count;
+
+  acquire(&kmem.lock);
+  count = kmem.refcnt[paindex(pa)];
+  release(&kmem.lock);
+  return count;
 }
