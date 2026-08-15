@@ -1,0 +1,12 @@
+1. Besides getpid(), uptime() could be accelerated with a shared read-only page.
+   The kernel could update a tick counter in that page, and user programs could
+   read the current value directly without entering the kernel. A real design
+   would take care that a multi-word value is read consistently.
+
+2. In the page table printed when init has just exec'd:
+   - virtual page 0 contains init's user text and data;
+   - virtual page 2 is the user stack page;
+   - virtual page 1 is the guard page. It has no PTE_U bit, so user mode cannot
+     read or write it;
+   - the third-to-last page is USYSCALL. It contains the read-only usyscall
+     structure, including the current process ID.
