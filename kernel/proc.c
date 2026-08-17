@@ -119,6 +119,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->mmap_next = MMAPBASE;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -163,6 +164,8 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->mmap_next = 0;
+  memset(p->vmas, 0, sizeof(p->vmas));
   p->state = UNUSED;
 }
 
@@ -288,6 +291,7 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  np->mmap_next = p->mmap_next;
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -299,6 +303,11 @@ fork(void)
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
+  for(i = 0; i < NVMA; i++)
+    if(p->vmas[i].file){
+      np->vmas[i] = p->vmas[i];
+      np->vmas[i].file = filedup(p->vmas[i].file);
+    }
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
@@ -343,6 +352,8 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  mmap_exit(p);
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

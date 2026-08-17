@@ -6,6 +6,7 @@
 
 #include "types.h"
 #include "riscv.h"
+#include "memlayout.h"
 #include "defs.h"
 #include "param.h"
 #include "stat.h"
@@ -48,6 +49,152 @@ fdalloc(struct file *f)
       p->ofile[fd] = f;
       return fd;
     }
+  }
+  return -1;
+}
+
+static int
+vma_unmap(struct proc *p, struct vma *vma, uint64 addr, uint64 length)
+{
+  uint64 a;
+
+  for(a = addr; a < addr + length; a += PGSIZE){
+    pte_t *pte = walk(p->pagetable, a, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      continue;
+
+    if(vma->flags == MAP_SHARED && (vma->prot & PROT_WRITE)){
+      begin_op();
+      ilock(vma->file->ip);
+      if(writei(vma->file->ip, 0, PTE2PA(*pte),
+                vma->offset + a - vma->addr, PGSIZE) != PGSIZE){
+        iunlock(vma->file->ip);
+        end_op();
+        return -1;
+      }
+      iunlock(vma->file->ip);
+      end_op();
+    }
+    uvmunmap(p->pagetable, a, 1, 1);
+  }
+
+  if(addr == vma->addr && length == vma->length){
+    fileclose(vma->file);
+    memset(vma, 0, sizeof(*vma));
+  } else if(addr == vma->addr){
+    vma->addr += length;
+    vma->offset += length;
+    vma->length -= length;
+  } else {
+    vma->length -= length;
+  }
+  return 0;
+}
+
+int
+mmap_pagefault(uint64 va)
+{
+  struct proc *p = myproc();
+  uint64 page = PGROUNDDOWN(va);
+  struct vma *vma = 0;
+  char *mem;
+  int perm = PTE_U;
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].file && page >= p->vmas[i].addr &&
+       page < p->vmas[i].addr + p->vmas[i].length){
+      vma = &p->vmas[i];
+      break;
+    }
+  }
+  if(vma == 0 || (mem = kalloc()) == 0)
+    return -1;
+
+  memset(mem, 0, PGSIZE);
+  ilock(vma->file->ip);
+  if(readi(vma->file->ip, 0, (uint64)mem,
+           vma->offset + page - vma->addr, PGSIZE) < 0){
+    iunlock(vma->file->ip);
+    kfree(mem);
+    return -1;
+  }
+  iunlock(vma->file->ip);
+
+  if(vma->prot & PROT_READ)
+    perm |= PTE_R;
+  if(vma->prot & PROT_WRITE)
+    perm |= PTE_R | PTE_W;
+  if(mappages(p->pagetable, page, PGSIZE, (uint64)mem, perm) < 0){
+    kfree(mem);
+    return -1;
+  }
+  return 0;
+}
+
+void
+mmap_exit(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++)
+    if(p->vmas[i].file)
+      vma_unmap(p, &p->vmas[i], p->vmas[i].addr, p->vmas[i].length);
+}
+
+uint64
+sys_mmap(void)
+{
+  struct proc *p = myproc();
+  struct file *f;
+  uint64 addr, length, offset;
+  int prot, flags, fd;
+  struct vma *vma = 0;
+
+  if(argaddr(0, &addr) < 0 || argaddr(1, &length) < 0 ||
+     argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+     argint(4, &fd) < 0 || argaddr(5, &offset) < 0)
+    return -1;
+  if(addr != 0 || length == 0 || offset != 0 || fd < 0 || fd >= NOFILE ||
+     (f = p->ofile[fd]) == 0 || f->type != FD_INODE ||
+     (flags != MAP_SHARED && flags != MAP_PRIVATE) ||
+     (prot & ~(PROT_READ | PROT_WRITE)) != 0 || prot == PROT_NONE ||
+     ((prot & PROT_READ) && !f->readable) ||
+     ((prot & PROT_WRITE) && flags == MAP_SHARED && !f->writable))
+    return -1;
+
+  length = PGROUNDUP(length);
+  if(p->mmap_next + length >= TRAPFRAME)
+    return -1;
+  for(int i = 0; i < NVMA; i++)
+    if(p->vmas[i].file == 0){
+      vma = &p->vmas[i];
+      break;
+    }
+  if(vma == 0)
+    return -1;
+
+  vma->addr = p->mmap_next;
+  vma->length = length;
+  vma->offset = offset;
+  vma->prot = prot;
+  vma->flags = flags;
+  vma->file = filedup(f);
+  p->mmap_next += length;
+  return vma->addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  struct proc *p = myproc();
+  uint64 addr, length;
+
+  if(argaddr(0, &addr) < 0 || argaddr(1, &length) < 0 ||
+     length == 0 || addr % PGSIZE || length % PGSIZE)
+    return -1;
+  for(int i = 0; i < NVMA; i++){
+    struct vma *vma = &p->vmas[i];
+    if(vma->file && addr >= vma->addr &&
+       addr + length <= vma->addr + vma->length)
+      return vma_unmap(p, vma, addr, length);
   }
   return -1;
 }

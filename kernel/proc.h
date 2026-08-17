@@ -82,6 +82,18 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+#define NVMA 16
+#define MMAPBASE 0x40000000L
+
+struct vma {
+  uint64 addr;
+  uint64 length;
+  uint64 offset;
+  int prot;
+  int flags;
+  struct file *file;
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -105,4 +117,6 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  uint64 mmap_next;            // Next free virtual address for mmap.
+  struct vma vmas[NVMA];       // File-backed memory mappings.
 };
